@@ -18,6 +18,7 @@ class ActivityPub::ProcessAccountService < BaseService
 
   class Error < StandardError; end
 
+  # It is the caller's responsibility to check that `json` is indeed from the origin matching `json['id']`
   def call(json, request_id: nil, only_key: false, signed_with_known_key: false, account: nil, suppress_errors: true)
     raise Error, "Actor #{json['id']} has unsupported URI scheme" if unsupported_uri_scheme?(json['id'])
     raise Error, "Actor #{json['id']} has no inbox" if json['inbox'].blank?
@@ -30,13 +31,7 @@ class ActivityPub::ProcessAccountService < BaseService
     @only_key    = only_key
     @webfinger_verified = false
 
-    if @account.present?
-      # TODO: handle renaming
-      @username = account.username
-      @domain = account.domain
-    else
-      extract_username_and_domain!
-    end
+    extract_username_and_domain!
 
     @domain = TagManager.instance.normalize_domain(@domain)
     return if @account.nil? && domain_not_allowed?(@domain)
@@ -54,6 +49,9 @@ class ActivityPub::ProcessAccountService < BaseService
         return if @account.nil?
       else
         @account ||= Account.find_remote(@username, @domain)
+
+        # It is possible that we are renaming an existing account. If so, try to find it
+        @account ||= Account.remote.find_by(uri: @uri)
       end
 
       @old_public_keys = @account.present? ? (@account.keypairs.pluck(:public_key) + [@account.public_key.presence].compact) : []
@@ -70,11 +68,16 @@ class ActivityPub::ProcessAccountService < BaseService
         end
 
         create_account
+      elsif @webfinger_verified
+        # The user has potentially changed handle, update it
+        rename_account!
       end
 
       update_account
       process_tags
 
+      # NOTE: while this case is unlikely due to the `rename_account!` above,
+      # we do not have a uniqueness constraint on URI, so this still needs to run
       process_duplicate_accounts! if @webfinger_verified
     end
 
@@ -100,6 +103,22 @@ class ActivityPub::ProcessAccountService < BaseService
 
   private
 
+  def rename_account!
+    raise 'Attempting to rename an account without having verified its webfinger handle' unless @webfinger_verified
+
+    begin
+      # This will be a no-op if the username and domain haven't changed
+      @account.update!(username: @username, domain: @domain)
+    rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique
+      # This account (identified by ActivityPub `id`) is being renamed to a handle that was
+      # previously known by this Mastodon account as another handle… ignore the renaming for now
+
+      # TODO: better handle this scenario
+
+      @account.restore_attributes([:username, :domain])
+    end
+  end
+
   def extract_username_and_domain!
     # FEP-2c59 defines a `webfinger` attribute that makes things more explicit and spares an extra request in some cases.
     # It supersedes `preferredUsername`.
@@ -113,7 +132,13 @@ class ActivityPub::ProcessAccountService < BaseService
       @domain   = Addressable::URI.parse(@uri).normalized_host
     end
 
-    check_webfinger! unless @only_key
+    if @account.present? && @username == @account.username && @domain == @account.domain
+      # This is an existing account whose handle has not changed, skip webfinger
+      @webfinger_verified = true
+    else
+      # This is either a new account, or an account whose handle has changed
+      check_webfinger! unless @only_key
+    end
   end
 
   def check_webfinger!
