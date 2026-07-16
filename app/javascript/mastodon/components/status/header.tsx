@@ -43,6 +43,21 @@ export const StatusHeader: FC<StatusHeaderProps> = ({
 }) => {
   const statusAccount = status.get('account') as Account | undefined;
   const editedAt = status.get('edited_at') as string;
+  const publicStatus = ['public', 'unlisted'].includes(
+    status.get('visibility') as string,
+  );
+  const isRemote =
+    status.getIn(['account', 'username']) !== status.getIn(['account', 'acct']);
+  const props =
+    publicStatus && isRemote
+      ? {
+          to: { pathname: status.get('url') as string },
+          target: '_blank',
+          rel: 'noopener noreferrer',
+        }
+      : {
+          to: `/@${statusAccount?.acct}/${status.get('id') as string}`,
+        };
 
   return (
     /* eslint-disable jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */
@@ -61,10 +76,7 @@ export const StatusHeader: FC<StatusHeaderProps> = ({
 
       {contentBeforeDate}
 
-      <Link
-        to={`/@${statusAccount?.acct}/${status.get('id') as string}`}
-        className='status__relative-time'
-      >
+      <Link {...props} className='status__relative-time'>
         <StatusVisibility visibility={status.get('visibility')} />
         <RelativeTimestamp timestamp={status.get('created_at') as string} />
         {editedAt && <StatusEditedAt editedAt={editedAt} />}
